@@ -40,6 +40,7 @@ with open('vyked/__init__.py', 'rb') as i:
     version = str(ast.literal_eval(re.compile(r'__version__\s+=\s+(.*)').search(i.read().decode('utf-8')).group(1)))
 
 os.system("git clone https://github.com/lloyd/yajl.git")
+os.system("sudo apt-get install cmake")
 cwd = os.getcwd()
 os.chdir("yajl")
 os.system("./configure")
