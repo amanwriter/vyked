@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from setuptools import setup, find_packages
 from os import getcwd, path
+import os
 from pip.req import parse_requirements
 from pip.download import PipSession
 
@@ -37,6 +38,13 @@ install_requires = [str(ir.req) for ir in install_reqs]
 
 with open('vyked/__init__.py', 'rb') as i:
     version = str(ast.literal_eval(re.compile(r'__version__\s+=\s+(.*)').search(i.read().decode('utf-8')).group(1)))
+
+os.system("git clone https://github.com/lloyd/yajl.git")
+cwd = os.getcwd()
+os.chdir("yajl")
+os.system("./configure")
+os.system("make install")
+os.chdir(cwd)
 
 setup(
     name='vyked',
