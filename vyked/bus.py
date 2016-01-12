@@ -101,7 +101,7 @@ class TCPBus:
             asyncio.async(self._connect_to_client(host, node_id, port, type, sc))
 
     def send(self, packet: dict):
-        packet['from'] = self._host_id
+        packet['from'] = self.tcp_host.node_id
         func = getattr(self, '_' + packet['type'] + '_sender')
         func(packet)
 
