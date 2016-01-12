@@ -224,6 +224,8 @@ class Registry:
             self._get_uptime_report(packet, protocol)
         elif request_type == 'change_log_level':
             self._handle_log_change(packet, protocol)
+        elif request_type == 'stop':
+            self._handle_stop()
 
     def deregister_service(self, host, port, node_id):
         service = self._repository.get_node(node_id)
@@ -380,6 +382,9 @@ class Registry:
         for handler in logging.getLogger().handlers:
             handler.setLevel(level)
         protocol.send('Logging level updated')
+
+    def _handle_stop(self):
+        asyncio.get_event_loop().stop()
 
 
 if __name__ == '__main__':

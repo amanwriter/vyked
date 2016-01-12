@@ -173,6 +173,10 @@ class TCPBus:
             self._handle_publish(packet, protocol)
         elif packet['type'] == 'change_log_level':
             self._handle_log_change(packet, protocol)
+        elif packet['type'] == 'stop':
+            self._handle_stop()
+        elif packet['type'] == 'close_connection':
+            self._handle_close_connection(packet['node_id'])
         else:
             if self.tcp_host.is_for_me(packet['service'], packet['version']):
                 func = getattr(self, '_' + packet['type'] + '_receiver')
@@ -228,6 +232,12 @@ class TCPBus:
         for handler in logging.getLogger().handlers:
             handler.setLevel(level)
         protocol.send('Logging level updated')
+
+    def _handle_stop(self):
+        asyncio.get_event_loop().stop()
+
+    def _handle_close_connection(self, node_id):
+        self._client_protocols[node_id].close()
 
 
 class PubSubBus:
