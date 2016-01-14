@@ -403,7 +403,7 @@ if __name__ == '__main__':
     from setproctitle import setproctitle
 
     setproctitle("registry")
-    REGISTRY_HOST = None
+    REGISTRY_HOST = '127.0.0.1'
     REGISTRY_PORT = 4500
     registry = Registry(REGISTRY_HOST, REGISTRY_PORT, Repository())
     registry.periodic_uptime_logger()
