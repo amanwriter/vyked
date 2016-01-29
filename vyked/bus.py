@@ -17,6 +17,8 @@ from .protocol_factory import get_vyked_protocol
 from .utils.jsonencoder import VykedEncoder
 from .exceptions import ClientNotFoundError
 
+import time
+
 HTTP = 'http'
 TCP = 'tcp'
 
@@ -196,6 +198,7 @@ class TCPBus:
 
             def send_result(f):
                 result_packet = f.result()
+                result_packet['timestamp'] = time.time()
                 protocol.send(result_packet)
 
             future.add_done_callback(send_result)

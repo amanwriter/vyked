@@ -1,5 +1,6 @@
 from collections import defaultdict
 from uuid import uuid4
+import time
 
 
 class _Packet:
@@ -157,7 +158,8 @@ class MessagePacket(_Packet):
                 'entity': entity,
                 'endpoint': endpoint,
                 'type': packet_type,
-                'payload': params}
+                'payload': params,
+                'timestamp': time.time()}
 
     @classmethod
     def publish(cls, publish_id, service, version, endpoint, payload):
