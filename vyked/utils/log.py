@@ -78,53 +78,28 @@ def patch_add_handler(logger):
 
 
 DEFAULT_CONFIG_YAML = """
-    # logging config
-
-    version: 1
-    disable_existing_loggers: False
-    handlers:
-        stream:
-            class: logging.StreamHandler
-            level: INFO
-            formatter: ctf
-            stream: ext://sys.stdout
-
-        stats:
-            class: logging.FileHandler
-            level: INFO
-            formatter: cjf
-            filename: logs/vyked_stats.log
-
-        service:
-            class: logging.FileHandler
-            level: INFO
-            formatter: ctf
-            filename: logs/vyked_service.log
-
-    formatters:
-        ctf:
-            (): vyked.utils.log.CustomTimeLoggingFormatter
-            format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            datefmt: '%Y-%m-%d %H:%M:%S,%f'
-
-        cjf:
-            (): vyked.utils.log.CustomJsonFormatter
-            format: '{ "timestamp":"%(asctime)s", "message":"%(message)s"}'
-            datefmt: '%Y-%m-%d %H:%M:%S,%f'
-
-    root:
-        handlers: [stream, service]
-        level: INFO
-
-    loggers:
-        registry:
-            handlers: [service,]
-            level: INFO
-
-        stats:
-            handlers: [stats]
-            level: INFO
-
+# logging config
+version: 1
+disable_existing_loggers: False
+handlers:
+    socket:
+        class: logging.handlers.SocketHandler
+        level: DEBUG
+        formatter: ctf
+        host: '127.0.0.1'
+        port: 4999
+formatters:
+    ctf:
+        (): vyked.utils.log.CustomTimeLoggingFormatter
+        format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S,%f'
+    cjf:
+        (): vyked.utils.log.CustomJsonFormatter
+        format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S,%f'
+root:
+    handlers: [socket]
+    level: DEBUG
     """
 
 
