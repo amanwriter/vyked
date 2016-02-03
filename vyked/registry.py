@@ -426,10 +426,8 @@ class Registry:
             return
         if blacklist_ip not in self._blacklist:
             self._blacklist.append(blacklist_ip)
-            self._deregister_address(blacklist_ip, getattr(packet, 'port', None))
-            protocol.send(blacklist_ip+" was successfully blacklisted")
-        else:
-            protocol.send(blacklist_ip+" was already blacklisted")
+        self._deregister_address(blacklist_ip, packet.get('port'))
+        protocol.send(blacklist_ip+" was successfully blacklisted")
 
     def _handle_whitelist(self, packet, protocol):
         try:
