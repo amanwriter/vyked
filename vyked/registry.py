@@ -100,15 +100,24 @@ class Repository:
         thehost = None
         for name, versions in self._registered_services.items():
             for version, instances in versions.items():
+                to_remove = []
                 for instance in instances:
                     host, port, node, service_type = instance
                     if node_id == node:
                         thehost = host
-                        instances.remove(instance)
+                        to_remove.append(instance)
                         try:
                             self.remove_pending_instance(name, version, node_id)
                         except ValueError:
                             pass
+                for instance in to_remove:
+                    instances.remove(instance)
+        for name, versions in self._subscribe_list.items():
+            for version, endpoints in versions.items():
+                for endpoint, subscribers in endpoints.items():
+                    to_remove = list(filter(lambda x : node_id == x[4], subscribers))
+                    for subscriber in to_remove:
+                        subscribers.remove(subscriber)
         for name, nodes in self._uptimes.items():
             for host, uptimes in nodes.items():
                 if host == thehost and uptimes['node_id'] == node_id:
@@ -137,6 +146,16 @@ class Repository:
 
     def get_subscribers(self, service, version, endpoint):
         return self._subscribe_list[service][version][endpoint]
+
+    def get_services_at_address(self, ip, port=None):
+        services = []
+        for name, versions in self._registered_services.items():
+            for version, instances in versions.items():
+                for instance in instances:
+                    service_host, service_port, node_id, service_type = instance
+                    if (service_host == ip) and ((port == service_port) or not port):
+                        services.append((service_host, service_port, node_id, service_type))
+        return services
 
     def _get_non_breaking_version(self, version, versions):
         if version in versions:
@@ -172,6 +191,7 @@ class Registry:
         self._tcp_pingers = {}
         self._http_pingers = {}
         self.logger = logging.getLogger()
+        self._blacklist = []
         try:
             config = json_file_to_dict('./config.json')
             self._ssl_context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
@@ -219,13 +239,17 @@ class Registry:
         elif request_type == 'pong':
             self._ping(packet)
         elif request_type == 'ping':
-            self._handle_ping(packet, protocol)
+            self._handle_ping(packet, protocol, transport.get_extra_info("peername")[0])
         elif request_type == 'uptime_report':
             self._get_uptime_report(packet, protocol)
         elif request_type == 'change_log_level':
             self._handle_log_change(packet, protocol)
         elif request_type == 'stop':
             self._handle_stop()
+        elif request_type == 'blacklist':
+            self._handle_blacklist(packet, protocol)
+        elif request_type == 'whitelist':
+            self._handle_whitelist(packet, protocol)
 
     def deregister_service(self, host, port, node_id):
         service = self._repository.get_node(node_id)
@@ -388,7 +412,7 @@ class Registry:
     def _handle_stop(self):
         asyncio.get_event_loop().stop()
 
-    def _handle_ping(self, packet, protocol):
+    def _handle_ping(self, packet, protocol, ip):
         """ Responds to pings from registry_client only if the node_ids present in the ping payload are registered
         :param packet: The 'ping' packet received
         :param protocol: The protocol on which the pong should be sent
@@ -396,6 +420,39 @@ class Registry:
         payload = packet.get('payload', {}).values()
         if all(map(self._repository.get_node, payload)) or not payload:
             self._pong(packet, protocol)
+        elif ip in self._blacklist:
+            self._pong(packet, protocol)
+
+    def _handle_blacklist(self, packet, protocol):
+        try:
+            blacklist_ip = packet["ip"]
+        except KeyError:
+            protocol.send("Malformed packet")
+            return
+        if blacklist_ip not in self._blacklist:
+            self._blacklist.append(blacklist_ip)
+            self._deregister_address(blacklist_ip, getattr(packet, 'port', None))
+            protocol.send(blacklist_ip+" was successfully blacklisted")
+        else:
+            protocol.send(blacklist_ip+" was already blacklisted")
+
+    def _handle_whitelist(self, packet, protocol):
+        try:
+            self._blacklist.remove(packet["ip"])
+        except KeyError:
+            protocol.send("Malformed packet")
+        except ValueError:
+            protocol.send(packet["ip"] + " was not blacklisted")
+        else:
+            protocol.send(packet["ip"] + " was successfully whitelisted")
+
+    def _deregister_address(self, ip, port=None):
+        for service_host, service_port, node_id, service_type in self._repository.get_services_at_address(ip, port):
+            if service_type == 'tcp':
+                self._tcp_pingers[node_id].stop()
+                self._tcp_pingers[node_id].on_timeout()
+            else:
+                self.deregister_service(service_host, service_port, node_id)
 
 
 if __name__ == '__main__':
