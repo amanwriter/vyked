@@ -257,8 +257,9 @@ class Registry:
         self._http_pingers.pop((host, port), None)
         if service:
             for_log = {"caller_name": service.name + '/' + service.version, "caller_address": service.host,
-                       "request_type": 'deregister'}
+                       "request_type": "deregister"}
             self.logger.debug(for_log)
+            self.logger.debug(node_id + ' deregistered!')
             self._repository.remove_node(node_id)
             if service is not None:
                 self._service_protocols.pop(node_id, None)
@@ -368,7 +369,7 @@ class Registry:
 
     def on_timeout(self, host, port, node_id):
         service = self._repository.get_node(node_id)
-        self.logger.debug('%s timed out', service)
+        self.logger.debug('%s will be deregistered', service)
         self.deregister_service(host, port, node_id)
 
     def _ping(self, packet):
@@ -431,10 +432,8 @@ class Registry:
             return
         if blacklist_ip not in self._blacklist:
             self._blacklist.append(blacklist_ip)
-            self._deregister_address(blacklist_ip, getattr(packet, 'port', None))
-            protocol.send(blacklist_ip+" was successfully blacklisted")
-        else:
-            protocol.send(blacklist_ip+" was already blacklisted")
+        self._deregister_address(blacklist_ip, packet.get('port'))
+        protocol.send(blacklist_ip+" was successfully blacklisted")
 
     def _handle_whitelist(self, packet, protocol):
         try:
