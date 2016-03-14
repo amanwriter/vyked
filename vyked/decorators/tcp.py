@@ -67,6 +67,22 @@ def _get_subscribe_decorator(func):
     return wrapper
 
 
+# TODO: new decorator for task_queues
+def task_queue(func=None, queue_name=None):
+    if func is None:
+        return partial(task_queue, queue_name=queue_name)
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        coroutine_func = func
+        if not asyncio.iscoroutine(func):
+            coroutine_func = asyncio.coroutine(func)
+        return (yield from coroutine_func(*args, **kwargs))
+    wrapper.queue_name = queue_name
+    wrapper.is_task_queue = True
+    return wrapper
+
+
 def request(func):
     """
     use to request an api call from a specific endpoint
