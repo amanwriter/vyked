@@ -241,6 +241,7 @@ class PubSubBus:
         self._pubsub_handler = None
         self._registry_client = registry_client
         self._clients = None
+        self._service = None
         self._ssl_context = ssl_context
 
     def create_pubsub_handler(self, host, port):
@@ -316,3 +317,20 @@ class PubSubBus:
         if node_id:
             return '/'.join((service, str(version), endpoint, node_id))
         return '/'.join((service, str(version), endpoint))
+
+    def register_for_task_queues(self, service):
+        self._service = service
+        endpoints = []
+        for method in dir(service):
+            fn = getattr(service, method)
+            if getattr(fn, 'is_task_queue', False):
+                if fn.queue_name not in endpoints:
+                    endpoints.append(fn.queue_name)
+        if len(endpoints):
+            yield from self._pubsub_handler.task_getter(endpoints, self.task_queue_handler)
+
+    def task_queue_handler(self, queue_name, payload):
+        for method in dir(self._service):
+            fn = getattr(self._service, method)
+            if getattr(fn, 'is_task_queue', False) and getattr(fn, 'queue_name', None)==queue_name:
+                asyncio.async(fn(payload))

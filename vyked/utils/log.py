@@ -88,6 +88,13 @@ handlers:
         formatter: ctf
         host: '127.0.0.1'
         port: 4999
+
+    stream:
+        class: logging.StreamHandler
+        level: INFO
+        formatter: ctf
+        stream: ext://sys.stdout
+
 formatters:
     ctf:
         (): vyked.utils.log.CustomTimeLoggingFormatter
@@ -98,7 +105,7 @@ formatters:
         format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         datefmt: '%Y-%m-%d %H:%M:%S,%f'
 root:
-    handlers: [socket]
+    handlers: [socket, stream]
     level: DEBUG
     """
 

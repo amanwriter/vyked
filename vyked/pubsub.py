@@ -67,5 +67,13 @@ class PubSub:
             handler(payload.channel, payload.value)
         return False
 
+    @asyncio.coroutine
+    def task_getter(self, endpoints, handler):
+        connection = yield from self._get_conn()
+        while True:
+            response = yield from connection.brpop(endpoints)
+            queue_name, payload = response.list_name, response.value
+            handler(queue_name, payload)
+
     def _get_conn(self):
         return (yield from redis.Connection.create(self._redis_host, self._redis_port, auto_reconnect=True))
