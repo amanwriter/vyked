@@ -16,19 +16,23 @@ class _Packet:
         return {'pid': cls._next_pid(), 'type': 'ack', 'request_id': request_id}
 
     @classmethod
-    def pong(cls, node_id):
-        return cls._get_ping_pong(node_id, 'pong')
+    def pong(cls, node_id, payload=None):
+        return cls._get_ping_pong(node_id, 'pong', payload=payload)
 
     @classmethod
-    def ping(cls, node_id):
-        return cls._get_ping_pong(node_id, 'ping')
+    def ping(cls, node_id, payload=None):
+        return cls._get_ping_pong(node_id, 'ping', payload=payload)
 
     @classmethod
-    def _get_ping_pong(cls, node_id, packet_type):
-        return {'pid': cls._next_pid(), 'type': packet_type, 'node_id': node_id}
+    def _get_ping_pong(cls, node_id, packet_type, payload=None):
+        return_dict = {'pid': cls._next_pid(), 'type': packet_type, 'node_id': node_id}
+        if payload:
+            return_dict['payload'] = payload
+        return return_dict
 
 
 class ControlPacket(_Packet):
+
     @classmethod
     def registration(cls, ip: str, port: int, node_id, service: str, version: str, dependencies, service_type: str):
         v = [{'service': vendor.name, 'version': vendor.version} for vendor in dependencies]
@@ -54,6 +58,11 @@ class ControlPacket(_Packet):
                   'params': params,
                   'request_id': str(uuid4())}
 
+        return packet
+
+    @classmethod
+    def blacklist(cls, host, port):
+        packet = {'pid': cls._next_pid(), 'type': 'blacklist_service', 'ip': host, 'port': port}
         return packet
 
     @classmethod
@@ -106,8 +115,8 @@ class ControlPacket(_Packet):
     @classmethod
     def xsubscribe(cls, service, version, host, port, node_id, endpoints):
         params = {'service': service, 'version': version, 'host': host, 'port': port, 'node_id': node_id}
-        events = [{'service': service, 'version': version, 'endpoint': endpoint, 'strategy': strategy} for
-                  service, version, endpoint, strategy in endpoints]
+        events = [{'service': _service, 'version': _version, 'endpoint': endpoint, 'strategy': strategy} for
+                  _service, _version, endpoint, strategy in endpoints]
         params['events'] = events
         packet = {'pid': cls._next_pid(),
                   'type': 'xsubscribe',
@@ -117,8 +126,7 @@ class ControlPacket(_Packet):
     @classmethod
     def subscribers(cls, service, version, endpoint, request_id, subscribers):
         params = {'service': service, 'version': version, 'endpoint': endpoint}
-        subscribers = [{'service': service, 'version': version, 'host': host, 'port': port, 'node_id': node_id,
-                        'strategy': strategy} for service, version, host, port, node_id, strategy in subscribers]
+        subscribers = [{'service': _service, 'version': _version} for _service, _version in subscribers]
         params['subscribers'] = subscribers
         packet = {'pid': cls._next_pid(),
                   'request_id': request_id,
@@ -143,6 +151,7 @@ class ControlPacket(_Packet):
 
 
 class MessagePacket(_Packet):
+
     @classmethod
     def request(cls, name, version, app_name, packet_type, endpoint, params, entity):
         return {'pid': cls._next_pid(),

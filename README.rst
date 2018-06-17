@@ -188,3 +188,45 @@ Source code
 -----------
 The latest developer version is available in a github repository:
 https://github.com/kashifrazzaqui/vyked
+
+
+
+New methods usage
+^^^^^^^
+TCPServiceClient._send_http_request(method, params) : automatically resolves host,port for Host service which is registered at registry and sends http request.
+Uses aiohttp  session object with timeout of 60 secs and keep alive timeout of 15 secs.
+
+
+Sample Host Service:
+
+.. code-block:: python
+
+    from vyked import TCPService, Host, api, HTTPService, get, Request
+    from aiohttp.web import Response
+
+    class HTTPService(HTTPService):
+        def __init__(self, host, port):
+            super(HTTPService, self).__init__('host_service_1', '1.0.0', 'localhost', 4700)
+            self.inventory_manager = InventoryManager()
+
+        @get(path='/ping_host_service_1', is_internal=True)
+        @exception_handler_http
+        def get_config_for_service(self, request: Request) -> Response:
+            return Response(status=200, body=json.dumps(object_to_dict({'result':success})).encode(),
+                            headers={'content-type':'Application/json'})
+
+Sample  Client Service:
+
+.. code-block:: python
+
+    from vyked import TCPServiceClient, request
+    class ServiceClient(TCPServiceClient):
+        def __init__(self):
+            super(ServiceClient, self).__init__('host_service_1', '1.0.0')
+
+        def get_config(self, service_name):
+            response = yield from self._send_http_request('get',params = {'path':'/ping_host_service_1',
+                                                                          'params':{}})
+            result = yield from response.json()
+            return result
+

@@ -1,25 +1,30 @@
 from functools import wraps, partial
 from again.utils import unique_hex
-from ..utils.stats import Stats
-
+from ..utils.stats import Stats, Aggregator
+from ..exceptions import VykedServiceException
+from ..utils.common_utils import json_file_to_dict, valid_timeout
 import asyncio
 import logging
 import socket
 import setproctitle
 import time
-_logger = logging.getLogger()
+import traceback
+import json
+from ..config import CONFIG
+_tcp_timeout = CONFIG.TCP_TIMEOUT
 
 
-def publish(func):
+def publish(func=None, blocking=False):
     """
     publish the return value of this function as a message from this endpoint
     """
-
+    if func is None:
+        return partial(publish, blocking=blocking)
     @wraps(func)
     def wrapper(self, *args, **kwargs):  # outgoing
         payload = func(self, *args, **kwargs)
         payload.pop('self', None)
-        self._publish(func.__name__, payload)
+        self._publish(func.__name__, payload, blocking=blocking)
         return None
 
     wrapper.is_publish = True
@@ -37,7 +42,7 @@ def subscribe(func):
     return wrapper
 
 
-def xsubscribe(func=None, strategy='DESIGNATION'):
+def xsubscribe(func=None, strategy='DESIGNATION', blocking=False):
     """
     Used to listen for publications from a specific endpoint of a service. If multiple instances
     subscribe to an endpoint, only one of them receives the event. And the publish event is retried till
@@ -48,11 +53,12 @@ def xsubscribe(func=None, strategy='DESIGNATION'):
     which registered for that endpoint.
     """
     if func is None:
-        return partial(xsubscribe, strategy=strategy)
+        return partial(xsubscribe, strategy=strategy, blocking=blocking)
     else:
         wrapper = _get_subscribe_decorator(func)
         wrapper.is_xsubscribe = True
         wrapper.strategy = strategy
+        wrapper.blocking = blocking
         return wrapper
 
 
@@ -87,7 +93,7 @@ def request(func):
     return wrapper
 
 
-def api(func):  # incoming
+def api(func=None, timeout=None):  # incoming
     """
     provide a request/response api
     receives any requests here and return value is the response
@@ -96,8 +102,11 @@ def api(func):  # incoming
         - entity (partition/routing key)
         followed by kwargs
     """
-    wrapper = _get_api_decorator(func)
-    return wrapper
+    if func is None:
+        return partial(api, timeout=timeout)
+    else:
+        wrapper = _get_api_decorator(func=func, timeout=timeout)
+        return wrapper
 
 
 def deprecated(func=None, replacement_api=None):
@@ -108,12 +117,13 @@ def deprecated(func=None, replacement_api=None):
         return wrapper
 
 
-def _get_api_decorator(func=None, old_api=None, replacement_api=None):
+def _get_api_decorator(func=None, old_api=None, replacement_api=None, timeout=None):
     @asyncio.coroutine
     @wraps(func)
     def wrapper(*args, **kwargs):
-
+        _logger = logging.getLogger(__name__)
         start_time = int(time.time() * 1000)
+        start_process_time = int(time.process_time() * 1000)
         self = args[0]
         rid = kwargs.pop('request_id')
         entity = kwargs.pop('entity')
@@ -121,28 +131,58 @@ def _get_api_decorator(func=None, old_api=None, replacement_api=None):
         wrapped_func = func
         result = None
         error = None
+        failed = False
+        api_timeout = _tcp_timeout
 
+        status = 'succesful'
+        success = True
         if not asyncio.iscoroutine(func):
             wrapped_func = asyncio.coroutine(func)
+
+        if valid_timeout(timeout):
+            api_timeout = timeout
 
         Stats.tcp_stats['total_requests'] += 1
 
         try:
-            result = yield from asyncio.wait_for(wrapped_func(self, **kwargs), 120)
+            result = yield from asyncio.wait_for(asyncio.shield(wrapped_func(self, **kwargs)), api_timeout)
 
         except asyncio.TimeoutError as e:
             Stats.tcp_stats['timedout'] += 1
             error = str(e)
+            status = 'timeout'
+            success = False
+            failed = True
+            logging.exception("TCP request had a timeout for method %s", func.__name__)
+
+        except VykedServiceException as e:
+            Stats.tcp_stats['total_responses'] += 1
+            error = str(e)
+            status = 'handled_error'
+            _logger.info('Handled exception %s for method %s ', e.__class__.__name__, func.__name__)
 
         except Exception as e:
             Stats.tcp_stats['total_errors'] += 1
-            _logger.exception('api request exception')
             error = str(e)
+            status = 'unhandled_error'
+            success = False
+            failed = True
+            _logger.exception('Unhandled exception %s for method %s ', e.__class__.__name__, func.__name__)
+            _stats_logger = logging.getLogger('stats')
+            _method_param = json.dumps(kwargs)
+            d = {"exception_type": e.__class__.__name__, "method_name": func.__name__, "message": str(e),
+                 "method_param": _method_param, "service_name": self._service_name,
+                 "hostname": socket.gethostbyname(socket.gethostname())}
+            _stats_logger.info(dict(d))
+            _exception_logger = logging.getLogger('exceptions')
+            d["message"] = traceback.format_exc()
+            _exception_logger.info(dict(d))
 
         else:
             Stats.tcp_stats['total_responses'] += 1
 
         end_time = int(time.time() * 1000)
+        end_process_time = int(time.process_time() * 1000)
 
         hostname = socket.gethostname()
         service_name = '_'.join(setproctitle.getproctitle().split('_')[:-1])
@@ -152,13 +192,50 @@ def _get_api_decorator(func=None, old_api=None, replacement_api=None):
             'time_taken': end_time - start_time,
             'hostname': hostname, 'service_name': service_name
         }
-        logging.getLogger('stats').info(logd)
+        logging.getLogger('stats').debug(logd)
         _logger.debug('Time taken for %s is %d milliseconds', func.__name__, end_time - start_time)
-        if not (old_api):
+        _logger.debug('Timeout for %s is %s seconds', func.__name__, api_timeout)
+
+        # call to update aggregator, designed to replace the stats module.
+        Aggregator.update_stats(endpoint=func.__name__, status=status, success=success,
+                                server_type='tcp', time_taken=end_time - start_time,
+                                process_time_taken=end_process_time - start_process_time)
+
+        if not old_api:
             return self._make_response_packet(request_id=rid, from_id=from_id, entity=entity, result=result,
-                                              error=error)
+                                              error=error, failed=failed, method=func.__name__,
+                                              service_name=self.name)
         else:
             return self._make_response_packet(request_id=rid, from_id=from_id, entity=entity, result=result,
-                                              error=error, old_api=old_api, replacement_api=replacement_api)
+                                              error=error, failed=failed, old_api=old_api,
+                                              replacement_api=replacement_api, method=func.__name__,
+                                              service_name=self.name)
+
     wrapper.is_api = True
+    return wrapper
+
+
+def task_queue(func=None, queue_name=None):
+    if func is None:
+        return partial(task_queue, queue_name=queue_name)
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        coroutine_func = func
+        if not asyncio.iscoroutine(func):
+            coroutine_func = asyncio.coroutine(func)
+        return (yield from coroutine_func(*args, **kwargs))
+    wrapper.queue_name = queue_name
+    wrapper.is_task_queue = True
+    return wrapper
+
+
+def enqueue(func=None, queue_name=None):
+    if func is None:
+        return partial(enqueue, queue_name=queue_name)
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):  # outgoing
+        payload = func(self, *args, **kwargs)
+        payload.pop('self', None)
+        self._enqueue(queue_name, payload)
+        return None
     return wrapper

@@ -1,30 +1,47 @@
 from logging import Handler
-from logging.handlers import RotatingFileHandler
 from queue import Queue
-import sys
-import os
 from threading import Thread
+import logging.config
 import logging
 import asyncio
 import datetime
+import yaml
+import sys
+import os
+from git import Repo
+
 from functools import partial, wraps
 from pythonjsonlogger import jsonlogger
 
-FILE_SIZE = 5 * 1024 * 1024
-
-LOGS_DIR = './logs'
-LOG_FILE_NAME = 'vyked-{}.log'
 
 RED = '\033[91m'
 BLUE = '\033[94m'
 BOLD = '\033[1m'
 END = '\033[0m'
 
-stream_handler = logging.StreamHandler()
-ping_logs_enabled = False
+_BRANCH_NAME = None
+http_pings_logs_disabled = True
 
-stats_logformat = '{ "timestamp":"%(asctime)s", "message":"%(message)s"}'
+def get_current_working_repo():
+    branch_name = None
+    current_tag = None
 
+    try:
+        repo = Repo(os.getcwd())
+        branch = repo.active_branch
+        branch_name = branch.name
+        tags = repo.tags
+        if tags and isinstance(tags, list):
+            current_tag = tags[-1].name
+    except:
+        pass
+    
+    return (branch_name, current_tag)
+
+def http_ping_filter(record):
+    if "GET /ping/" in record.getMessage():
+       return 0
+    return 1
 
 class CustomTimeLoggingFormatter(logging.Formatter):
 
@@ -34,6 +51,9 @@ class CustomTimeLoggingFormatter(logging.Formatter):
         to display time in microseconds. Time module by default does not resolve
         time to microseconds.
         """
+        
+        record.branchname = _BRANCH_NAME
+
         if datefmt:
             s = datetime.datetime.now().strftime(datefmt)
         else:
@@ -50,17 +70,8 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
 
     def add_fields(self, log_record, record, message_dict):
         message_dict.update(self.extrad)
+        record.branchname = _BRANCH_NAME
         super().add_fields(log_record, record, message_dict)
-
-
-def is_ping_logging_enabled():
-    return ping_logs_enabled
-
-
-def config_logs(enable_ping_logs=False, log_level=logging.INFO):
-    global ping_logs_enabled
-    ping_logs_enabled = enable_ping_logs
-    stream_handler.setLevel(log_level)
 
 
 def patch_async_emit(handler: Handler):
@@ -95,41 +106,94 @@ def patch_add_handler(logger):
     return async_add_handler
 
 
-def create_logging_directory():
-    log_dir = os.path.join(os.getcwd(), LOGS_DIR)
-    if not os.path.exists(log_dir):
-        os.mkdir(LOGS_DIR)
+DEFAULT_CONFIG_YAML = """
+    # logging config
 
+    version: 1
+    disable_existing_loggers: False
+    handlers:
+        stream:
+            class: logging.StreamHandler
+            level: INFO
+            formatter: ctf
+            stream: ext://sys.stdout
 
-def setup_logging(identifier):
+        stats:
+            class: logging.FileHandler
+            level: INFO
+            formatter: cjf
+            filename: logs/vyked_stats.log
+
+        exceptions:
+            class: logging.FileHandler
+            level: INFO
+            formatter: cjf
+            filename: logs/vyked_exceptions.log
+
+        service:
+            class: logging.FileHandler
+            level: INFO
+            formatter: ctf
+            filename: logs/vyked_service.log
+
+    formatters:
+        ctf:
+            (): vyked.utils.log.CustomTimeLoggingFormatter
+            format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            datefmt: '%Y-%m-%d %H:%M:%S,%f'
+
+        cjf:
+            (): vyked.utils.log.CustomJsonFormatter
+            format: '{ "timestamp":"%(asctime)s", "message":"%(message)s"}'
+            datefmt: '%Y-%m-%d %H:%M:%S,%f'
+
+    root:
+        handlers: [stream, service]
+        level: INFO
+
+    loggers:
+        registry:
+            handlers: [service,]
+            level: INFO
+
+        stats:
+            handlers: [stats]
+            level: INFO
+
+        exceptions:
+            handlers: [exceptions]
+            level: INFO
+
+    """
+
+def setup_logging(_):
+    try:
+        with open('config_log.json', 'r') as f:
+            config_dict = yaml.load(f.read())
+    except:
+        config_dict = yaml.load(DEFAULT_CONFIG_YAML)
+
     logging.getLogger('asyncio').setLevel(logging.WARNING)
-    create_logging_directory()
     logger = logging.getLogger()
     logger.handlers = []
     logger.addHandler = patch_add_handler(logger)
-    formatter = CustomTimeLoggingFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                                           '%Y-%m-%d %H:%M:%S,%f')
-    stream_handler.setLevel(logging.INFO)
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
-    logfile = os.path.join(LOGS_DIR, LOG_FILE_NAME.format(identifier))
-    rotating_handler = RotatingFileHandler(logfile, maxBytes=FILE_SIZE, backupCount=10)
-    rotating_handler.setFormatter(formatter)
-    logger.addHandler(rotating_handler)
+    
+    global _BRANCH_NAME
+    (branch_name, current_tag) = get_current_working_repo()
+    _BRANCH_NAME = branch_name
 
-    stats_logger = logging.getLogger('stats')
-    stats_formatter = CustomJsonFormatter(stats_logformat)
-    stats_logfile = os.path.join(LOGS_DIR, 'vyked_stats.log')
-    stats_handler = RotatingFileHandler(stats_logfile, maxBytes=1024 * 1024, backupCount=5)
-    stats_handler.setLevel(logging.INFO)
-    stats_handler.setFormatter(stats_formatter)
-    stats_logger.addHandler(stats_handler)
-    stats_logger.addHandler(rotating_handler)
-    # Stats.periodic_stats_logger()
+    if 'handlers' in config_dict:
+        for handler in config_dict['handlers']:
+            if 'branch_name' in config_dict['handlers'][handler] and config_dict['handlers'][handler]['branch_name'] == True:
+                config_dict['handlers'][handler]['release'] = current_tag if current_tag else None
+                if 'tags' in config_dict['handlers'][handler] and isinstance(config_dict['handlers'][handler]['tags'], dict):
+                    config_dict['handlers'][handler]['tags']['branch'] = branch_name if branch_name else None
+                    
+    logging.config.dictConfig(config_dict)
 
-    registry_logger = logging.getLogger('vyked.registry')
-    registry_logger.addHandler(stats_handler)
-
+    if http_pings_logs_disabled:
+        for handler in logging.root.handlers:
+            handler.addFilter(http_ping_filter)
 
 def log(fn=None, logger=logging.getLogger(), debug_level=logging.DEBUG):
     """

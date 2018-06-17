@@ -3,7 +3,6 @@ import logging
 from functools import partial
 import signal
 import os
-import socket
 
 from aiohttp.web import Application
 
@@ -12,10 +11,8 @@ from vyked.registry_client import RegistryClient
 from vyked.services import HTTPService, TCPService
 from .protocol_factory import get_vyked_protocol
 from .utils.log import setup_logging
-from vyked.utils.stats import Stats
-
-_logger = logging.getLogger(__name__)
-
+from vyked.utils.stats import Stats, Aggregator
+from .utils.client_stats import ClientStats
 
 class Host:
     registry_host = None
@@ -29,15 +26,17 @@ class Host:
     _http_service = None
     registry_client_ssl = None
 
+    _logger = logging.getLogger(__name__)
+
     @classmethod
     def _set_process_name(cls):
         from setproctitle import setproctitle
 
-        setproctitle('{}_{}'.format(cls.name, cls._host_id))
+        setproctitle('{}_{}_{}'.format('vyked', cls.name, cls._host_id))
 
     @classmethod
     def _stop(cls, signame: str):
-        _logger.info('\ngot signal {} - exiting'.format(signame))
+        cls._logger.info('\ngot signal {} - exiting'.format(signame))
         asyncio.get_event_loop().stop()
 
     @classmethod
@@ -47,19 +46,20 @@ class Host:
         elif isinstance(service, TCPService):
             cls._tcp_service = service
         else:
-            _logger.error('Invalid argument attached as service')
+            cls._logger.error('Invalid argument attached as service')
         cls._set_bus(service)
 
     @classmethod
     def run(cls):
         if cls._tcp_service or cls._http_service:
             cls._set_host_id()
+            cls._setup_logging()
+
             cls._set_process_name()
             cls._set_signal_handlers()
-            cls._setup_logging()
             cls._start_server()
         else:
-            _logger.error('No services to host')
+            cls._logger.error('No services to host')
 
     @classmethod
     def _set_signal_handlers(cls):
@@ -83,15 +83,20 @@ class Host:
             ssl_context = cls._http_service.ssl_context
             app = Application(loop=asyncio.get_event_loop())
             fn = getattr(cls._http_service, 'pong')
-            app.router.add_route('GET', '/ping', fn)
+            fn2 = getattr(cls._http_service, 'pong2')
+            app.router.add_route('GET', '/ping/{node}', fn)
+            app.router.add_route('GET', '/ping', fn2)
+            app.router.add_route('GET', '/_stats', getattr(cls._http_service, 'stats'))
+            app.router.add_route('GET', '/_change_log_level/{level}', getattr(cls._http_service, 'handle_log_change'))
             for each in cls._http_service.__ordered__:
                 fn = getattr(cls._http_service, each)
                 if callable(fn) and getattr(fn, 'is_http_method', False):
                     for path in fn.paths:
                         app.router.add_route(fn.method, path, fn)
+                        cls._logger.debug(path)
                         if cls._http_service.cross_domain_allowed:
                             app.router.add_route('options', path, cls._http_service.preflight_response)
-            handler = app.make_handler(access_log=_logger)
+            handler = app.make_handler(access_log=cls._logger)
             task = asyncio.get_event_loop().create_server(handler, host_ip, host_port, ssl=ssl_context)
             return asyncio.get_event_loop().run_until_complete(task)
 
@@ -108,12 +113,13 @@ class Host:
         cls._register_services()
         cls._create_pubsub_handler()
         cls._subscribe()
+        cls._task_queues()
         if tcp_server:
-            _logger.info('Serving TCP on {}'.format(tcp_server.sockets[0].getsockname()))
+            cls._logger.info('Serving TCP on {}'.format(tcp_server.sockets[0].getsockname()))
         if http_server:
-            _logger.info('Serving HTTP on {}'.format(http_server.sockets[0].getsockname()))
-        _logger.info("Event loop running forever, press CTRL+c to interrupt.")
-        _logger.info("pid %s: send SIGINT or SIGTERM to exit." % os.getpid())
+            cls._logger.info('Serving HTTP on {}'.format(http_server.sockets[0].getsockname()))
+        cls._logger.info("Event loop running forever, press CTRL+c to interrupt.")
+        cls._logger.info("pid %s: send SIGINT or SIGTERM to exit." % os.getpid())
         try:
             asyncio.get_event_loop().run_forever()
         except Exception as e:
@@ -130,12 +136,15 @@ class Host:
             asyncio.get_event_loop().close()
 
     @classmethod
+    def _create_pub_sub_handler(cls):
+        pubsub = yield from cls._tcp_service.pubsub_bus.create_pubsub_handler(cls.pubsub_host, cls.pubsub_port)
+        cls._tcp_service.tcp_bus.pubsub = pubsub
+
+    @classmethod
     def _create_pubsub_handler(cls):
         if not cls.ronin:
             if cls._tcp_service:
-                asyncio.get_event_loop().run_until_complete(
-                    cls._tcp_service.pubsub_bus
-                    .create_pubsub_handler(cls.pubsub_host, cls.pubsub_port))
+                asyncio.get_event_loop().run_until_complete(cls._create_pub_sub_handler())
             if cls._http_service:
                 asyncio.get_event_loop().run_until_complete(
                     cls._http_service.pubsub_bus.create_pubsub_handler(cls.pubsub_host, cls.pubsub_port))
@@ -147,13 +156,21 @@ class Host:
                 asyncio.async(
                     cls._tcp_service.pubsub_bus.register_for_subscription(cls._tcp_service.host, cls._tcp_service.port,
                                                                           cls._tcp_service.node_id,
-                                                                          cls._tcp_service.clients))
-            if cls._http_service:
+                                                                          cls._tcp_service.clients, cls._tcp_service))
+            elif cls._http_service:
                 asyncio.async(
                     cls._http_service.pubsub_bus.register_for_subscription(cls._http_service.host,
                                                                            cls._http_service.port,
                                                                            cls._http_service.node_id,
-                                                                           cls._http_service.clients))
+                                                                           cls._http_service.clients, cls._http_service))
+
+    @classmethod
+    def _task_queues(cls):
+        if not cls.ronin:
+            if cls._tcp_service:
+                asyncio.async(cls._tcp_service.pubsub_bus.register_for_task_queues(cls._tcp_service))
+            elif cls._http_service:
+                asyncio.async(cls._http_service.pubsub_bus.register_for_task_queues(cls._http_service))
 
     @classmethod
     def _set_bus(cls, service):
@@ -183,6 +200,9 @@ class Host:
     @classmethod
     def _setup_logging(cls):
         host = cls._tcp_service if cls._tcp_service else cls._http_service
-        setup_logging('{}_{}'.format(host.name, host.socket_address[1]))
+        identifier = '{}_{}'.format(host.name, host.socket_address[1])
+        setup_logging(identifier)
         Stats.service_name = host.name
         Stats.periodic_stats_logger()
+        Aggregator.periodic_aggregated_stats_logger()
+        ClientStats.periodic_aggregator()
